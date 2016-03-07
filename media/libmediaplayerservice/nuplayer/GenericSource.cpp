@@ -128,6 +128,7 @@ status_t NuPlayer::GenericSource::setDataSource(
 
 status_t NuPlayer::GenericSource::setDataSource(const sp<DataSource>& source) {
     resetDataSource();
+    Mutex::Autolock _l(mSourceLock);
     mDataSource = source;
     return OK;
 }
@@ -140,14 +141,14 @@ status_t NuPlayer::GenericSource::initFromDataSource() {
     sp<MediaExtractor> extractor;
     String8 mimeType;
     float confidence;
-    sp<AMessage> dummy;
+    sp<AMessage> meta;
     bool isWidevineStreaming = false;
 
     CHECK(mDataSource != NULL);
 
     if (mIsWidevine) {
         isWidevineStreaming = SniffWVM(
-                mDataSource, &mimeType, &confidence, &dummy);
+                mDataSource, &mimeType, &confidence, &meta);
         if (!isWidevineStreaming ||
                 strcasecmp(
                     mimeType.string(), MEDIA_MIMETYPE_CONTAINER_WVM)) {
@@ -155,7 +156,12 @@ status_t NuPlayer::GenericSource::initFromDataSource() {
             return UNKNOWN_ERROR;
         }
     } else if (mIsStreaming) {
-        if (!mDataSource->sniff(&mimeType, &confidence, &dummy)) {
+        sp<DataSource> dataSource;
+        {
+            Mutex::Autolock _l(mSourceLock);
+            dataSource = mDataSource;
+        }
+        if (!dataSource->sniff(&mimeType, &confidence, &meta)) {
             return UNKNOWN_ERROR;
         }
         isWidevineStreaming = !strcasecmp(
@@ -173,9 +179,14 @@ status_t NuPlayer::GenericSource::initFromDataSource() {
         }
         extractor = mWVMExtractor;
     } else {
+#ifndef TARGET_8974
+        int32_t flags = AVNuUtils::get()->getFlags();
+#else
+        int32_t flags = 0;
+#endif
         extractor = MediaExtractor::Create(mDataSource,
                 mimeType.isEmpty() ? NULL : mimeType.string(),
-                mIsStreaming ? 0 : AVNuUtils::get()->getFlags());
+                mIsStreaming ? 0 : flags, &meta);
     }
 
     if (extractor == NULL) {
@@ -205,10 +216,12 @@ status_t NuPlayer::GenericSource::initFromDataSource() {
         }
     }
 
+#ifndef TARGET_8974
     if (AVNuUtils::get()->canUseSetBuffers(mFileMeta)) {
         mUseSetBuffers = true;
         ALOGI("setBuffers mode enabled");
     }
+#endif
 
     int32_t totalBitrate = 0;
 
@@ -348,7 +361,7 @@ void NuPlayer::GenericSource::prepareAsync() {
     if (mLooper == NULL) {
         mLooper = new ALooper;
         mLooper->setName("generic");
-        mLooper->start();
+        mLooper->start(false, false, PRIORITY_AUDIO);
 
         mLooper->registerHandler(this);
     }
@@ -380,14 +393,20 @@ void NuPlayer::GenericSource::onPrepareAsync() {
                 }
             }
 
-            mDataSource = DataSource::CreateFromURI(
+            sp<DataSource> dataSource;
+            dataSource = DataSource::CreateFromURI(
                    mHTTPService, uri, &mUriHeaders, &contentType,
                    static_cast<HTTPBase *>(mHttpSource.get()),
                    true /*use extended cache*/);
+            Mutex::Autolock _l(mSourceLock);
+            mDataSource = dataSource;
         } else {
             mIsWidevine = false;
 
-            mDataSource = new FileSource(mFd, mOffset, mLength);
+            sp<DataSource> dataSource;
+            dataSource = new FileSource(mFd, mOffset, mLength);
+            Mutex::Autolock _l(mSourceLock);
+            mDataSource = dataSource;
             mFd = -1;
         }
 

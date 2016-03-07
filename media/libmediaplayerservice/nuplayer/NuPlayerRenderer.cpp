@@ -850,6 +850,18 @@ bool NuPlayer::Renderer::onDrainAudioQueue() {
     // immediately after start. Investigate error message
     // "vorbis_dsp_synthesis returned -135", along with RTSP.
     uint32_t numFramesPlayed;
+    if(!mAudioSink->ready() && !mAudioQueue.empty()) {
+        while (!mAudioQueue.empty()) {
+            QueueEntry *entry = &*mAudioQueue.begin();
+            if (entry->mBuffer == NULL) {
+                notifyEOS(true /* audio */, entry->mFinalResult);
+            }
+            mAudioQueue.erase(mAudioQueue.begin());
+            entry = NULL;
+        }
+        return false;
+    }
+
     if (mAudioSink->getPosition(&numFramesPlayed) != OK) {
         // When getPosition fails, renderer will not reschedule the draining
         // unless new samples are queued.
@@ -1074,6 +1086,9 @@ void NuPlayer::Renderer::postDrainVideoQueue() {
                 mMediaClock->updateAnchor(mediaTimeUs, nowUs, mediaTimeUs);
                 mAnchorTimeMediaUs = mediaTimeUs;
                 realTimeUs = nowUs;
+            } else if (!mVideoSampleReceived) {
+                // Always render the first video frame.
+                realTimeUs = nowUs;
             } else {
                 realTimeUs = getRealTimeUs(mediaTimeUs, nowUs);
             }
@@ -1139,7 +1154,7 @@ void NuPlayer::Renderer::onDrainVideoQueue() {
         return;
     }
 
-    int64_t nowUs = -1;
+    int64_t nowUs = ALooper::GetNowUs();
     int64_t realTimeUs;
     if (mFlags & FLAG_REAL_TIME) {
         CHECK(entry->mBuffer->meta()->findInt64("timeUs", &realTimeUs));
@@ -1147,16 +1162,12 @@ void NuPlayer::Renderer::onDrainVideoQueue() {
         int64_t mediaTimeUs;
         CHECK(entry->mBuffer->meta()->findInt64("timeUs", &mediaTimeUs));
 
-        nowUs = ALooper::GetNowUs();
         realTimeUs = getRealTimeUs(mediaTimeUs, nowUs);
     }
 
     bool tooLate = false;
 
     if (!mPaused) {
-        if (nowUs == -1) {
-            nowUs = ALooper::GetNowUs();
-        }
         setVideoLateByUs(nowUs - realTimeUs);
         tooLate = (mVideoLateByUs > 40000);
 
@@ -1178,6 +1189,12 @@ void NuPlayer::Renderer::onDrainVideoQueue() {
             Mutex::Autolock autoLock(mLock);
             clearAnchorTime_l();
         }
+    }
+
+    // Always render the first video frame while keeping stats on A/V sync.
+    if (!mVideoSampleReceived) {
+        realTimeUs = nowUs;
+        tooLate = false;
     }
 
     entry->mNotifyConsumed->setInt64("timestampNs", realTimeUs * 1000ll);
@@ -1255,6 +1272,30 @@ void NuPlayer::Renderer::onQueueBuffer(const sp<AMessage> &msg) {
 
     if (audio) {
         Mutex::Autolock autoLock(mLock);
+#if 1
+        sp<ABuffer> newBuffer;
+        status_t err = AVNuUtils::get()->convertToSinkFormatIfNeeded(
+                buffer, newBuffer,
+                (offloadingAudio() ? mCurrentOffloadInfo.format : mCurrentPcmInfo.mFormat),
+                offloadingAudio());
+        switch (err) {
+        case NO_INIT:
+            // passthru decoder pushes some buffers before the audio sink
+            // is opened. Since the offload format is known only when the sink
+            // is opened, pcm conversions cannot take place. So, retry.
+            ALOGI("init pending, retrying in 10ms, this shouldn't happen");
+            msg->post(10000LL);
+            return;
+        case OK:
+            break;
+        default:
+            ALOGW("error 0x%x in converting to sink format, drop buffer", err);
+            notifyConsumed->post();
+            return;
+        }
+        CHECK(newBuffer != NULL);
+        entry.mBuffer = newBuffer;
+#endif
         mAudioQueue.push_back(entry);
         postDrainAudioQueue_l();
     } else {
@@ -1548,6 +1589,13 @@ void NuPlayer::Renderer::onResume() {
             ALOGE("cannot start AudioSink err %d", err);
             notifyAudioTearDown();
         }
+        //Update anchor time after resuming playback.
+        if (offloadingAudio()) {
+            int64_t nowUs = ALooper::GetNowUs();
+            int64_t nowMediaUs =
+                mAudioFirstAnchorTimeMediaUs + getPlayedOutAudioDurationUs(nowUs);
+            mMediaClock->updateAnchor(nowMediaUs, nowUs, INT64_MAX);
+        }
     }
 
     {
@@ -1723,7 +1771,7 @@ status_t NuPlayer::Renderer::onOpenAudioSink(
     }
 
     int32_t bitWidth = 16;
-    format->findInt32("bit-width", &bitWidth);
+    format->findInt32("bits-per-sample", &bitWidth);
 
     int32_t sampleRate;
     CHECK(format->findInt32("sample-rate", &sampleRate));
@@ -1741,8 +1789,10 @@ status_t NuPlayer::Renderer::onOpenAudioSink(
             onDisableOffloadAudio();
         } else {
             audioFormat = AVUtils::get()->updateAudioFormat(audioFormat, format);
-
             bitWidth = AVUtils::get()->getAudioSampleBits(format);
+            ALOGV("Mime \"%s\" mapped to audio_format 0x%x",
+                    mime.c_str(), audioFormat);
+
             int avgBitRate = -1;
             format->findInt32("bitrate", &avgBitRate);
 
@@ -1761,6 +1811,8 @@ status_t NuPlayer::Renderer::onOpenAudioSink(
                     ALOGV("Format is AAC ADTS\n");
                 }
             }
+
+            ALOGV("onOpenAudioSink: %s", format->debugString().c_str());
 
             int32_t offloadBufferSize =
                                     AVUtils::get()->getAudioMaxInputBufferSize(
@@ -1832,6 +1884,7 @@ status_t NuPlayer::Renderer::onOpenAudioSink(
             } else {
                 mUseAudioCallback = true;  // offload mode transfers data through callback
                 ++mAudioDrainGeneration;  // discard pending kWhatDrainAudioQueue message.
+                mFlags |= FLAG_OFFLOAD_AUDIO;
             }
         }
     }

@@ -548,6 +548,7 @@ status_t MatroskaSource::readBlock() {
             mPendingFrames.clear();
 
             mBlockIter.advance();
+            mbuf->release();
             return ERROR_IO;
         }
 
@@ -668,9 +669,11 @@ status_t MatroskaSource::read(
             if (pass == 1) {
                 memcpy(&dstPtr[dstOffset], "\x00\x00\x00\x01", 4);
 
-                memcpy(&dstPtr[dstOffset + 4],
-                       &srcPtr[srcOffset + mNALSizeLen],
-                       NALsize);
+                if (frame != buffer) {
+                    memcpy(&dstPtr[dstOffset + 4],
+                           &srcPtr[srcOffset + mNALSizeLen],
+                           NALsize);
+                }
             }
 
             dstOffset += 4;  // 0x00 00 00 01
@@ -692,7 +695,13 @@ status_t MatroskaSource::read(
         if (pass == 0) {
             dstSize = dstOffset;
 
-            buffer = new MediaBuffer(dstSize);
+            if (dstSize == srcSize && mNALSizeLen == 4) {
+                // In this special case we can re-use the input buffer by substituting
+                // each 4-byte nal size with a 4-byte start code
+                buffer = frame;
+            } else {
+                buffer = new MediaBuffer(dstSize);
+            }
 
             int64_t timeUs;
             CHECK(frame->meta_data()->findInt64(kKeyTime, &timeUs));
@@ -706,8 +715,10 @@ status_t MatroskaSource::read(
         }
     }
 
-    frame->release();
-    frame = NULL;
+    if (frame != buffer) {
+        frame->release();
+        frame = NULL;
+    }
 
     if (targetSampleTimeUs >= 0ll) {
         buffer->meta_data()->setInt64(
@@ -781,7 +792,12 @@ MatroskaExtractor::MatroskaExtractor(const sp<DataSource> &source)
          info->GetWritingAppAsUTF8());
 #endif
 
-    addTracks();
+    ret = addTracks();
+    if (ret < 0) {
+        delete mSegment;
+        mSegment = NULL;
+        return;
+    }
 }
 
 MatroskaExtractor::~MatroskaExtractor() {
@@ -892,6 +908,8 @@ static void addESDSFromCodecPrivate(
 
     meta->setData(kKeyESDS, 0, esds, esdsSize);
 
+    updateVideoTrackInfoFromESDS_MPEG4Video(meta);
+
     delete[] esds;
     esds = NULL;
 }
@@ -974,7 +992,7 @@ status_t addVorbisCodecInfo(
     return OK;
 }
 
-void MatroskaExtractor::addTracks() {
+int MatroskaExtractor::addTracks() {
     const mkvparser::Tracks *tracks = mSegment->GetTracks();
 
     for (size_t index = 0; index < tracks->GetTracksCount(); ++index) {
@@ -1051,7 +1069,7 @@ void MatroskaExtractor::addTracks() {
                 if (!strcmp("A_AAC", codecID)) {
                     meta->setCString(kKeyMIMEType, MEDIA_MIMETYPE_AUDIO_AAC);
                     if (codecPrivateSize < 2) {
-                        return;
+                        return -1;
                     }
 
                     addESDSFromCodecPrivate(
@@ -1097,6 +1115,7 @@ void MatroskaExtractor::addTracks() {
         trackInfo->mMeta = meta;
         trackInfo->mExtractor = this;
     }
+    return 0;
 }
 
 void MatroskaExtractor::findThumbnails() {

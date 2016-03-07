@@ -91,6 +91,9 @@
 #include <cpustats/ThreadCpuUsage.h>
 #endif
 
+#ifdef SRS_PROCESSING
+#include "postpro_patch.h"
+#endif
 // ----------------------------------------------------------------------------
 
 // Note: the following macro is used for extremely verbose logging message.  In
@@ -1184,7 +1187,7 @@ sp<AudioFlinger::EffectHandle> AudioFlinger::ThreadBase::createEffect_l(
 
     // Reject any effect on mixer or duplicating multichannel sinks.
     // TODO: fix both format and multichannel issues with effects.
-    if ((mType == MIXER || mType == DUPLICATING) && mChannelCount != FCC_2) {
+    if ((mType == MIXER || mType == DUPLICATING) && mChannelCount > FCC_2) {
         ALOGW("createEffect_l() Cannot add effect %s for multichannel(%d) %s threads",
                 desc->name, mChannelCount, mType == MIXER ? "MIXER" : "DUPLICATING");
         lStatus = BAD_VALUE;
@@ -2759,6 +2762,19 @@ bool AudioFlinger::PlaybackThread::threadLoop()
     const String8 myName(String8::format("thread %p type %d TID %d", this, mType, gettid()));
 
     acquireWakeLock();
+#ifdef SRS_PROCESSING
+    String8 bt_param = String8("bluetooth_enabled=0");
+    POSTPRO_PATCH_PARAMS_SET(bt_param);
+    if (mType == MIXER) {
+        POSTPRO_PATCH_OUTPROC_PLAY_INIT(this, myName);
+    } else if (mType == OFFLOAD) {
+        POSTPRO_PATCH_OUTPROC_DIRECT_INIT(this, myName);
+        POSTPRO_PATCH_OUTPROC_PLAY_ROUTE_BY_VALUE(this, mOutDevice);
+    } else if (mType == DIRECT) {
+        POSTPRO_PATCH_OUTPROC_DIRECT_INIT(this, myName);
+        POSTPRO_PATCH_OUTPROC_PLAY_ROUTE_BY_VALUE(this, mOutDevice);
+    }
+#endif
 
     // mNBLogWriter->log can only be called while thread mutex mLock is held.
     // So if you need to log when mutex is unlocked, set logString to a non-NULL string,
@@ -2957,7 +2973,13 @@ bool AudioFlinger::PlaybackThread::threadLoop()
                 effectChains[i]->process_l();
             }
         }
-
+#ifdef SRS_PROCESSING
+            // Offload thread
+            if (mType == OFFLOAD) {
+                char buffer[2];
+                POSTPRO_PATCH_OUTPROC_DIRECT_SAMPLES(this, AUDIO_FORMAT_PCM_16_BIT, (int16_t *) buffer, 2, 48000, 2);
+            }
+#endif
         // Only if the Effects buffer is enabled and there is data in the
         // Effects buffer (buffer valid), we need to
         // copy into the sink buffer.
@@ -2975,6 +2997,11 @@ bool AudioFlinger::PlaybackThread::threadLoop()
             // mSleepTimeUs == 0 means we must write to audio hardware
             if (mSleepTimeUs == 0) {
                 ssize_t ret = 0;
+#ifdef SRS_PROCESSING
+                if (mType == MIXER && mMixerStatus == MIXER_TRACKS_READY) {
+                    POSTPRO_PATCH_OUTPROC_PLAY_SAMPLES(this, mFormat, mSinkBuffer, mSinkBufferSize, mSampleRate, mChannelCount);
+                }
+#endif
                 if (mBytesRemaining) {
                     ret = threadLoop_write();
                     if (ret < 0) {
@@ -3018,8 +3045,9 @@ bool AudioFlinger::PlaybackThread::threadLoop()
                         //     the app won't fill fast enough to handle the sudden draw).
 
                         const int32_t deltaMs = delta / 1000000;
-                        const int32_t throttleMs = mHalfBufferMs - deltaMs;
-                        if ((signed)mHalfBufferMs >= throttleMs && throttleMs > 0) {
+                        const int32_t halfBufferMs = mHalfBufferMs / (mEffectBufferValid ? 4 : 1);
+                        const int32_t throttleMs = halfBufferMs - deltaMs;
+                        if ((signed)halfBufferMs >= throttleMs && throttleMs > 0) {
                             usleep(throttleMs * 1000);
                             // notify of throttle start on verbose log
                             ALOGV_IF(mThreadThrottleEndMs == mThreadThrottleTimeMs,
@@ -3070,7 +3098,15 @@ bool AudioFlinger::PlaybackThread::threadLoop()
         threadLoop_standby();
         mStandby = true;
     }
-
+#ifdef SRS_PROCESSING
+    if (mType == MIXER) {
+        POSTPRO_PATCH_OUTPROC_PLAY_EXIT(this, myName);
+    } else if (mType == OFFLOAD) {
+        POSTPRO_PATCH_OUTPROC_DIRECT_EXIT(this, myName);
+    } else if (mType == DIRECT) {
+        POSTPRO_PATCH_OUTPROC_DIRECT_EXIT(this, myName);
+    }
+#endif
     releaseWakeLock();
     mWakeLockUids.clear();
     mActiveTracksGeneration++;
@@ -3163,6 +3199,10 @@ status_t AudioFlinger::PlaybackThread::createAudioPatch_l(const struct audio_pat
     for (unsigned int i = 0; i < patch->num_sinks; i++) {
         type |= patch->sinks[i].ext.device.type;
     }
+
+#ifdef SRS_PROCESSING
+    POSTPRO_PATCH_OUTPROC_PLAY_ROUTE_BY_VALUE(this, type);
+#endif
 
 #ifdef ADD_BATTERY_DATA
     // when changing the audio output device, call addBatteryData to notify
@@ -4342,6 +4382,9 @@ bool AudioFlinger::MixerThread::checkForNewParameter_l(const String8& keyValuePa
 
     AudioParameter param = AudioParameter(keyValuePair);
     int value;
+#ifdef SRS_PROCESSING
+        POSTPRO_PATCH_OUTPROC_PLAY_ROUTE(this, param, value);
+#endif
     if (param.getInt(String8(AudioParameter::keySamplingRate), value) == NO_ERROR) {
         reconfig = true;
     }
@@ -4886,6 +4929,7 @@ bool AudioFlinger::DirectOutputThread::checkForNewParameter_l(const String8& key
 
     AudioParameter param = AudioParameter(keyValuePair);
     int value;
+
     if (param.getInt(String8(AudioParameter::keyRouting), value) == NO_ERROR) {
         // forward device change to effects that have requested to be
         // aware of attached audio device.
@@ -6640,7 +6684,11 @@ size_t AudioFlinger::RecordThread::RecordBufferConverter::convert(void *dst,
                 break;
             }
             // format convert to destination buffer
+#ifdef LEGACY_ALSA_AUDIO
+            convert(dst, buffer.raw, buffer.frameCount);
+#else
             convertNoResampler(dst, buffer.raw, buffer.frameCount);
+#endif
 
             dst = (int8_t*)dst + buffer.frameCount * mDstFrameSize;
             i -= buffer.frameCount;
@@ -6660,7 +6708,11 @@ size_t AudioFlinger::RecordThread::RecordBufferConverter::convert(void *dst,
         memset(mBuf, 0, frames * mBufFrameSize);
         frames = mResampler->resample((int32_t*)mBuf, frames, provider);
         // format convert to destination buffer
+#ifdef LEGACY_ALSA_AUDIO
+        convert(dst, mBuf, frames);
+#else
         convertResampler(dst, mBuf, frames);
+#endif
     }
     return frames;
 }
@@ -6761,6 +6813,56 @@ status_t AudioFlinger::RecordThread::RecordBufferConverter::updateParameters(
     return NO_ERROR;
 }
 
+#ifdef LEGACY_ALSA_AUDIO
+void AudioFlinger::RecordThread::RecordBufferConverter::convert(
+        void *dst, /*const*/ void *src, size_t frames)
+{
+    // check if a memcpy will do
+    if (mResampler == NULL
+            && mSrcChannelCount == mDstChannelCount
+            && mSrcFormat == mDstFormat) {
+        memcpy(dst, src,
+                frames * mDstChannelCount * audio_bytes_per_sample(mDstFormat));
+        return;
+    }
+    // reallocate buffer if needed
+    if (mBufFrameSize != 0 && mBufFrames < frames) {
+        free(mBuf);
+        mBufFrames = frames;
+        (void)posix_memalign(&mBuf, 32, mBufFrames * mBufFrameSize);
+    }
+    // do processing
+    if (mResampler != NULL) {
+        // src channel count is always >= 2.
+        void *dstBuf = mBuf != NULL ? mBuf : dst;
+        // ditherAndClamp() works as long as all buffers returned by
+        // activeTrack->getNextBuffer() are 32 bit aligned which should be always true.
+        if (mDstChannelCount == 1) {
+            // the resampler always outputs stereo samples.
+            // FIXME: this rewrites back into src
+            ditherAndClamp((int32_t *)src, (const int32_t *)src, frames);
+            downmix_to_mono_i16_from_stereo_i16((int16_t *)dstBuf,
+                    (const int16_t *)src, frames);
+        } else {
+            ditherAndClamp((int32_t *)dstBuf, (const int32_t *)src, frames);
+        }
+    } else if (mSrcChannelCount != mDstChannelCount) {
+        void *dstBuf = mBuf != NULL ? mBuf : dst;
+        if (mSrcChannelCount == 1) {
+            upmix_to_stereo_i16_from_mono_i16((int16_t *)dstBuf, (const int16_t *)src,
+                    frames);
+        } else {
+            downmix_to_mono_i16_from_stereo_i16((int16_t *)dstBuf,
+                    (const int16_t *)src, frames);
+        }
+    }
+    if (mSrcFormat != mDstFormat) {
+        void *srcBuf = mBuf != NULL ? mBuf : src;
+        memcpy_by_audio_format(dst, mDstFormat, srcBuf, mSrcFormat,
+                frames * mDstChannelCount);
+    }
+}
+#else
 void AudioFlinger::RecordThread::RecordBufferConverter::convertNoResampler(
         void *dst, const void *src, size_t frames)
 {
@@ -6834,6 +6936,7 @@ void AudioFlinger::RecordThread::RecordBufferConverter::convertResampler(
     memcpy_by_audio_format(dst, mDstFormat, src, AUDIO_FORMAT_PCM_FLOAT,
             frames * mDstChannelCount);
 }
+#endif
 
 bool AudioFlinger::RecordThread::checkForNewParameter_l(const String8& keyValuePair,
                                                         status_t& status)

@@ -771,7 +771,6 @@ status_t MediaPlayerService::Client::setDataSource(int fd, int64_t offset, int64
 
     if (offset >= sb.st_size) {
         ALOGE("offset error");
-        ::close(fd);
         return UNKNOWN_ERROR;
     }
     if (offset + length > sb.st_size) {
@@ -1326,6 +1325,22 @@ void MediaPlayerService::Client::addNewMetadataUpdate(media::Metadata::Type meta
     if (mMetadataUpdated.indexOf(metadata_type) < 0) {
         mMetadataUpdated.add(metadata_type);
     }
+}
+
+status_t MediaPlayerService::Client::suspend()
+{
+    ALOGV("[%d] suspend", mConnId);
+    sp<MediaPlayerBase> p = getPlayer();
+    if (p == NULL) return NO_INIT;
+    return p->suspend();
+}
+
+status_t MediaPlayerService::Client::resume()
+{
+    ALOGV("[%d] resume", mConnId);
+    sp<MediaPlayerBase> p = getPlayer();
+    if (p == NULL) return NO_INIT;
+    return p->resume();
 }
 
 #if CALLBACK_ANTAGONIZER

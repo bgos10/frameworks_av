@@ -32,11 +32,6 @@
 #include <media/stagefright/MediaSource.h>
 #include <media/stagefright/MediaBuffer.h>
 
-#ifdef ENABLE_AV_ENHANCEMENTS
-#include "QCMediaDefs.h"
-#include "QCMetaData.h"
-#endif
-
 #include <system/audio.h>
 
 namespace android {
@@ -93,8 +88,17 @@ public:
     }
 
     // stream properties
+    unsigned getMinBlockSize() const {
+        return mStreamInfo.min_blocksize;
+    }
     unsigned getMaxBlockSize() const {
         return mStreamInfo.max_blocksize;
+    }
+    unsigned getMinFrameSize() const {
+        return mStreamInfo.min_framesize;
+    }
+    unsigned getMaxFrameSize() const {
+        return mStreamInfo.max_framesize;
     }
     unsigned getSampleRate() const {
         return mStreamInfo.sample_rate;
@@ -150,7 +154,7 @@ private:
     bool mWriteRequested;
     bool mWriteCompleted;
     FLAC__FrameHeader mWriteHeader;
-    const FLAC__int32 * const *mWriteBuffer;
+    const FLAC__int32 * mWriteBuffer[FLAC__MAX_CHANNELS];
 
     // most recent error reported by libFLAC parser
     FLAC__StreamDecoderErrorStatus mErrorStatus;
@@ -334,7 +338,9 @@ FLAC__StreamDecoderWriteStatus FLACParser::writeCallback(
         mWriteRequested = false;
         // FLAC parser doesn't free or realloc buffer until next frame or finish
         mWriteHeader = frame->header;
-        mWriteBuffer = buffer;
+        for(unsigned channel = 0; channel < frame->header.channels; channel++) {
+            mWriteBuffer[channel] = buffer[channel];
+        }
         mWriteCompleted = true;
         return FLAC__STREAM_DECODER_WRITE_STATUS_CONTINUE;
     } else {
@@ -441,7 +447,6 @@ FLACParser::FLACParser(
       mStreamInfoValid(false),
       mWriteRequested(false),
       mWriteCompleted(false),
-      mWriteBuffer(NULL),
       mErrorStatus((FLAC__StreamDecoderErrorStatus) -1)
 {
     ALOGV("FLACParser::FLACParser");
@@ -618,7 +623,7 @@ MediaBuffer *FLACParser::readBuffer(bool doSeek, FLAC__uint64 sample)
     short *data = (short *) buffer->data();
     buffer->set_range(0, bufferSize);
     // copy PCM from FLAC write buffer to our media buffer, with interleaving
-    copyBuffer(data, mWriteBuffer, blocksize);
+    copyBuffer(data, (const FLAC__int32 * const *)(&mWriteBuffer), blocksize);
     // fill in buffer metadata
     CHECK(mWriteHeader.number_type == FLAC__FRAME_NUMBER_TYPE_SAMPLE_NUMBER);
     FLAC__uint64 sampleNumber = mWriteHeader.number.sample_number;

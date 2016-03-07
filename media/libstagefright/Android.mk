@@ -1,7 +1,6 @@
 LOCAL_PATH:= $(call my-dir)
 include $(CLEAR_VARS)
 
-include frameworks/av/media/libstagefright/codecs/common/Config.mk
 
 LOCAL_SRC_FILES:=                         \
         ACodec.cpp                        \
@@ -66,6 +65,7 @@ LOCAL_SRC_FILES:=                         \
         VBRISeeker.cpp                    \
         VideoFrameScheduler.cpp           \
         WAVExtractor.cpp                  \
+        WAVEWriter.cpp                    \
         WVMExtractor.cpp                  \
         XINGSeeker.cpp                    \
         avc_utils.cpp                     \
@@ -126,6 +126,29 @@ LOCAL_STATIC_LIBRARIES := \
 
 LOCAL_WHOLE_STATIC_LIBRARIES := libavextensions
 
+ifeq ($(BOARD_USE_S3D_SUPPORT), true)
+ifeq ($(BOARD_USES_HWC_SERVICES), true)
+LOCAL_CFLAGS += -DUSE_S3D_SUPPORT -DHWC_SERVICES
+LOCAL_C_INCLUDES += \
+        $(TARGET_OUT_INTERMEDIATES)/KERNEL_OBJ/usr/include \
+        $(TOP)/hardware/samsung_slsi-$(TARGET_SLSI_VARIANT)/openmax/include/exynos \
+        $(TOP)/hardware/samsung_slsi-$(TARGET_SLSI_VARIANT)/$(TARGET_BOARD_PLATFORM)/libhwcService \
+        $(TOP)/hardware/samsung_slsi-$(TARGET_SLSI_VARIANT)/$(TARGET_BOARD_PLATFORM)/libhwc \
+        $(TOP)/hardware/samsung_slsi-$(TARGET_SLSI_VARIANT)/$(TARGET_BOARD_PLATFORM)/include \
+        $(TOP)/hardware/samsung_slsi-$(TARGET_SLSI_VARIANT)/$(TARGET_SOC)/libhwcmodule \
+        $(TOP)/hardware/samsung_slsi-$(TARGET_SLSI_VARIANT)/$(TARGET_SOC)/include \
+        $(TOP)/hardware/samsung_slsi-$(TARGET_SLSI_VARIANT)/exynos/libexynosutils \
+        $(TOP)/hardware/samsung_slsi-$(TARGET_SLSI_VARIANT)/exynos/include \
+        $(TOP)/hardware/samsung_slsi-$(TARGET_SLSI_VARIANT)/exynos/libhwc
+
+LOCAL_ADDITIONAL_DEPENDENCIES := \
+        $(TARGET_OUT_INTERMEDIATES)/KERNEL_OBJ/usr
+
+LOCAL_SHARED_LIBRARIES += \
+        libExynosHWCService
+endif
+endif
+
 LOCAL_SHARED_LIBRARIES += \
         libstagefright_enc_common \
         libstagefright_avc_common \
@@ -133,28 +156,58 @@ LOCAL_SHARED_LIBRARIES += \
         libdl \
         libRScpp \
 
-LOCAL_CFLAGS += -Wno-multichar -Werror -Wno-error=deprecated-declarations -Wall
+LOCAL_CFLAGS += -Werror -Wno-multichar -Wno-error=deprecated-declarations
 
 ifeq ($(TARGET_USES_QCOM_BSP), true)
     LOCAL_C_INCLUDES += $(call project-path-for,qcom-display)/libgralloc
     LOCAL_CFLAGS += -DQTI_BSP
 endif
 
+LOCAL_C_INCLUDES += $(call project-path-for,qcom-media)/mm-core/inc
+
 # enable experiments only in userdebug and eng builds
 ifneq (,$(filter userdebug eng,$(TARGET_BUILD_VARIANT)))
 LOCAL_CFLAGS += -DENABLE_STAGEFRIGHT_EXPERIMENTS
 endif
 
+ifeq ($(TARGET_BOARD_PLATFORM),omap4)
+LOCAL_CFLAGS += -DBOARD_CANT_REALLOCATE_OMX_BUFFERS
+endif
+
 ifeq ($(call is-vendor-board-platform,QCOM),true)
+LOCAL_C_INCLUDES += $(TARGET_OUT_HEADERS)/mm-audio
 ifeq ($(strip $(AUDIO_FEATURE_ENABLED_EXTN_FLAC_DECODER)),true)
     LOCAL_CFLAGS += -DQTI_FLAC_DECODER
 endif
 endif
 
+ifeq ($(strip $(AUDIO_FEATURE_ENABLED_FLAC_OFFLOAD)),true)
+    LOCAL_CFLAGS += -DFLAC_OFFLOAD_ENABLED
+endif
+
 LOCAL_CLANG := true
+
+ifeq ($(BOARD_USE_SAMSUNG_CAMERAFORMAT_NV21), true)
+# This needs flag requires the following string constant in
+# CameraParametersExtra.h:
+#
+# const char CameraParameters::PIXEL_FORMAT_YUV420SP_NV21[] = "nv21";
+LOCAL_CFLAGS += -DUSE_SAMSUNG_CAMERAFORMAT_NV21
+endif
 
 # FFMPEG plugin
 LOCAL_C_INCLUDES += $(TOP)/external/stagefright-plugins/include
+
+#LOCAL_CFLAGS += -DLOG_NDEBUG=0
+
+ifeq ($(BOARD_USE_SAMSUNG_COLORFORMAT), true)
+LOCAL_CFLAGS += -DUSE_SAMSUNG_COLORFORMAT
+
+# Include native color format header path
+LOCAL_C_INCLUDES += \
+	$(TOP)/hardware/samsung/exynos4/hal/include \
+	$(TOP)/hardware/samsung/exynos4/include
+endif
 
 LOCAL_MODULE:= libstagefright
 

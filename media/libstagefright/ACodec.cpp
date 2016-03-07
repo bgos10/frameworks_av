@@ -64,6 +64,7 @@
 #include <media/stagefright/PersistentSurface.h>
 #include <media/stagefright/SurfaceUtils.h>
 #include <media/stagefright/FFMPEGSoftCodec.h>
+#include <media/stagefright/Utils.h>
 
 #include <media/hardware/HardwareAPI.h>
 
@@ -72,6 +73,10 @@
 #include <OMX_Component.h>
 #include <OMX_IndexExt.h>
 #include <OMX_AsString.h>
+
+#ifdef USE_SAMSUNG_COLORFORMAT
+#include <sec_format.h>
+#endif
 
 #include "include/avc_utils.h"
 
@@ -565,12 +570,7 @@ ACodec::ACodec()
 ACodec::~ACodec() {
 }
 
-status_t ACodec::setupCustomCodec(status_t err, const char *mime, const sp<AMessage> &msg) {
-     if (!strncmp(mComponentName.c_str(), "OMX.ffmpeg.", 11) && !mIsEncoder) {
-         return FFMPEGSoftCodec::setAudioFormat(
-               msg, mime, mOMX, mNode);
-     }
-
+status_t ACodec::setupCustomCodec(status_t err, const char * /*mime*/, const sp<AMessage> &/*msg*/) {
     return err;
 }
 
@@ -751,7 +751,7 @@ status_t ACodec::handleSetSurface(const sp<Surface> &surface) {
         if (storingMetadataInDecodedBuffers()
                 && !mLegacyAdaptiveExperiment
                 && info.mStatus == BufferInfo::OWNED_BY_NATIVE_WINDOW) {
-            ALOGV("skipping buffer %p", info.mGraphicBuffer->getNativeBuffer());
+            ALOGV("skipping buffer %p", info.mGraphicBuffer.get() ? info.mGraphicBuffer->getNativeBuffer() : 0x0);
             continue;
         }
         ALOGV("attaching buffer %p", info.mGraphicBuffer->getNativeBuffer());
@@ -939,14 +939,43 @@ status_t ACodec::setupNativeWindowSizeFormatAndUsage(
     usage |= kVideoGrallocUsage;
     *finalUsage = usage;
 
+#ifdef USE_SAMSUNG_COLORFORMAT
+    OMX_COLOR_FORMATTYPE eNativeColorFormat = def.format.video.eColorFormat;
+    setNativeWindowColorFormat(eNativeColorFormat);
+#endif
+
     ALOGV("gralloc usage: %#x(OMX) => %#x(ACodec)", omxUsage, usage);
-    return setNativeWindowSizeFormatAndUsage(
+    err = setNativeWindowSizeFormatAndUsage(
             nativeWindow,
             def.format.video.nFrameWidth,
             def.format.video.nFrameHeight,
+#ifdef USE_SAMSUNG_COLORFORMAT
+            eNativeColorFormat,
+#else
             def.format.video.eColorFormat,
+#endif
             mRotationDegrees,
             usage);
+#ifdef QCOM_HARDWARE
+    if (err == OK) {
+        OMX_CONFIG_RECTTYPE rect;
+        InitOMXParams(&rect);
+        rect.nPortIndex = kPortIndexOutput;
+        err = mOMX->getConfig(
+                mNode, OMX_IndexConfigCommonOutputCrop, &rect, sizeof(rect));
+        if (err == OK) {
+            ALOGV("rect size = %d, %d, %d, %d", rect.nLeft, rect.nTop, rect.nWidth, rect.nHeight);
+            android_native_rect_t crop;
+            crop.left = rect.nLeft;
+            crop.top = rect.nTop;
+            crop.right = rect.nLeft + rect.nWidth - 1;
+            crop.bottom = rect.nTop + rect.nHeight - 1;
+            ALOGV("crop update (%d, %d), (%d, %d)", crop.left, crop.top, crop.right, crop.bottom);
+            err = native_window_set_crop(nativeWindow, &crop);
+        }
+    }
+#endif
+    return err;
 }
 
 status_t ACodec::configureOutputBuffersFromNativeWindow(
@@ -1005,6 +1034,12 @@ status_t ACodec::configureOutputBuffersFromNativeWindow(
     // 2. try to allocate two (2) additional buffers to reduce starvation from
     //    the consumer
     //    plus an extra buffer to account for incorrect minUndequeuedBufs
+#ifdef BOARD_CANT_REALLOCATE_OMX_BUFFERS
+    // Some devices don't like to set OMX_IndexParamPortDefinition at this
+    // point (even with an unmodified def), so skip it if possible.
+    // This check was present in KitKat.
+    if (def.nBufferCountActual < def.nBufferCountMin + *minUndequeuedBuffers) {
+#endif
     for (OMX_U32 extraBuffers = 2 + 1; /* condition inside loop */; extraBuffers--) {
         OMX_U32 newBufferCount =
             def.nBufferCountMin + *minUndequeuedBuffers + extraBuffers;
@@ -1024,6 +1059,9 @@ status_t ACodec::configureOutputBuffersFromNativeWindow(
             return err;
         }
     }
+#ifdef BOARD_CANT_REALLOCATE_OMX_BUFFERS
+    }
+#endif
 
     err = native_window_set_buffer_count(
             mNativeWindow.get(), def.nBufferCountActual);
@@ -1275,6 +1313,27 @@ void ACodec::dumpBuffers(OMX_U32 portIndex) {
     }
 }
 
+#ifdef USE_SAMSUNG_COLORFORMAT
+void ACodec::setNativeWindowColorFormat(OMX_COLOR_FORMATTYPE &eNativeColorFormat)
+{
+    // In case of Samsung decoders, we set proper native color format for the Native Window
+    if (!strcasecmp(mComponentName.c_str(), "OMX.SEC.AVC.Decoder")
+        || !strcasecmp(mComponentName.c_str(), "OMX.SEC.FP.AVC.Decoder")
+        || !strcasecmp(mComponentName.c_str(), "OMX.SEC.MPEG4.Decoder")
+        || !strcasecmp(mComponentName.c_str(), "OMX.Exynos.AVC.Decoder")) {
+        switch (eNativeColorFormat) {
+            case OMX_COLOR_FormatYUV420SemiPlanar:
+                eNativeColorFormat = (OMX_COLOR_FORMATTYPE)HAL_PIXEL_FORMAT_YCbCr_420_SP;
+                break;
+            case OMX_COLOR_FormatYUV420Planar:
+            default:
+                eNativeColorFormat = (OMX_COLOR_FORMATTYPE)HAL_PIXEL_FORMAT_YCbCr_420_P;
+                break;
+        }
+    }
+}
+#endif
+
 status_t ACodec::cancelBufferToNativeWindow(BufferInfo *info) {
     CHECK_EQ((int)info->mStatus, (int)BufferInfo::OWNED_BY_US);
 
@@ -1358,7 +1417,8 @@ ACodec::BufferInfo *ACodec::dequeueBufferFromNativeWindow() {
         }
 
         bool stale = false;
-        for (size_t i = mBuffers[kPortIndexOutput].size(); i-- > 0;) {
+        for (size_t i = mBuffers[kPortIndexOutput].size(); i > 0;) {
+            i--;
             BufferInfo *info = &mBuffers[kPortIndexOutput].editItemAt(i);
 
             if (info->mGraphicBuffer != NULL &&
@@ -1401,7 +1461,8 @@ ACodec::BufferInfo *ACodec::dequeueBufferFromNativeWindow() {
 
     // get oldest undequeued buffer
     BufferInfo *oldest = NULL;
-    for (size_t i = mBuffers[kPortIndexOutput].size(); i-- > 0;) {
+    for (size_t i = mBuffers[kPortIndexOutput].size(); i > 0;) {
+        i--;
         BufferInfo *info =
             &mBuffers[kPortIndexOutput].editItemAt(i);
         if (info->mStatus == BufferInfo::OWNED_BY_NATIVE_WINDOW &&
@@ -1605,6 +1666,8 @@ status_t ACodec::setComponentRole(
             "audio_decoder.ac3", "audio_encoder.ac3" },
         { MEDIA_MIMETYPE_AUDIO_EAC3,
             "audio_decoder.eac3", "audio_encoder.eac3" },
+        { MEDIA_MIMETYPE_VIDEO_MPEG4_DP,
+            "video_decoder.mpeg4", NULL },
 #ifdef DOLBY_UDC
         { MEDIA_MIMETYPE_AUDIO_EAC3_JOC,
             "audio_decoder.eac3_joc", NULL },
@@ -1622,11 +1685,7 @@ status_t ACodec::setComponentRole(
     }
 
     if (i == kNumMimeToRole) {
-        status_t err = ERROR_UNSUPPORTED;
-        if (!strncmp(mComponentName.c_str(), "OMX.ffmpeg.", 11)) {
-            err = FFMPEGSoftCodec::setSupportedRole(mOMX, mNode, isEncoder, mime);
-        }
-        return err;
+        return FFMPEGSoftCodec::setSupportedRole(mOMX, mNode, isEncoder, mime);
     }
 
     const char *role =
@@ -2034,8 +2093,8 @@ status_t ACodec::configureCodec(
             err = OK;
         } else {
             int32_t bitsPerSample = 16;
-            msg->findInt32("bit-width", &bitsPerSample);
-            err = setupRawAudioFormat(
+            msg->findInt32("bits-per-sample", &bitsPerSample);
+            err = setupRawAudioFormatInternal(
                     encoder ? kPortIndexInput : kPortIndexOutput,
                     sampleRate,
                     numChannels, bitsPerSample);
@@ -2050,6 +2109,7 @@ status_t ACodec::configureCodec(
             int32_t sbrMode;
             int32_t maxOutputChannelCount;
             int32_t pcmLimiterEnable;
+            int32_t bitsPerSample = 16;
             drcParams_t drc;
             if (!msg->findInt32("is-adts", &isADTS)) {
                 isADTS = 0;
@@ -2088,11 +2148,12 @@ status_t ACodec::configureCodec(
                 // value is unknown
                 drc.targetRefLevel = -1;
             }
+            msg->findInt32("bits-per-sample", &bitsPerSample);
 
             err = setupAACCodec(
                     encoder, numChannels, sampleRate, bitRate, aacProfile,
                     isADTS != 0, sbrMode, maxOutputChannelCount, drc,
-                    pcmLimiterEnable);
+                    pcmLimiterEnable, bitsPerSample);
         }
     } else if (!strcasecmp(mime, MEDIA_MIMETYPE_AUDIO_AMR_NB)) {
         err = setupAMRCodec(encoder, false /* isWAMR */, bitRate);
@@ -2150,8 +2211,8 @@ status_t ACodec::configureCodec(
             err = INVALID_OPERATION;
         } else {
             int32_t bitsPerSample = 16;
-            msg->findInt32("bit-width", &bitsPerSample);
-            err = setupRawAudioFormat(kPortIndexInput, sampleRate, numChannels, bitsPerSample);
+            msg->findInt32("bits-per-sample", &bitsPerSample);
+            err = setupRawAudioFormatInternal(kPortIndexInput, sampleRate, numChannels, bitsPerSample);
         }
     } else if (!strncmp(mComponentName.c_str(), "OMX.google.", 11)
             && !strcasecmp(mime, MEDIA_MIMETYPE_AUDIO_AC3)) {
@@ -2162,7 +2223,7 @@ status_t ACodec::configureCodec(
             err = INVALID_OPERATION;
         } else {
             int32_t bitsPerSample = 16;
-            msg->findInt32("bit-width", &bitsPerSample);
+            msg->findInt32("bits-per-sample", &bitsPerSample);
             err = setupAC3Codec(encoder, numChannels, sampleRate, bitsPerSample);
         }
     } else if (!strcasecmp(mime, MEDIA_MIMETYPE_AUDIO_EAC3)) {
@@ -2173,11 +2234,16 @@ status_t ACodec::configureCodec(
             err = INVALID_OPERATION;
         } else {
             int32_t bitsPerSample = 16;
-            msg->findInt32("bit-width", &bitsPerSample);
+            msg->findInt32("bits-per-sample", &bitsPerSample);
             err = setupEAC3Codec(encoder, numChannels, sampleRate, bitsPerSample);
         }
     } else {
-        err = setupCustomCodec(err, mime, msg);
+        if (!strncmp(mComponentName.c_str(), "OMX.ffmpeg.", 11) && !mIsEncoder) {
+            err = FFMPEGSoftCodec::setAudioFormat(
+                  msg, mime, mOMX, mNode);
+        } else {
+            err = setupCustomCodec(err, mime, msg);
+        }
     }
 
     if (err != OK) {
@@ -2347,15 +2413,16 @@ status_t ACodec::setupAACCodec(
         bool encoder, int32_t numChannels, int32_t sampleRate,
         int32_t bitRate, int32_t aacProfile, bool isADTS, int32_t sbrMode,
         int32_t maxOutputChannelCount, const drcParams_t& drc,
-        int32_t pcmLimiterEnable) {
+        int32_t pcmLimiterEnable, int32_t bitsPerSample) {
     if (encoder && isADTS) {
         return -EINVAL;
     }
 
-    status_t err = setupRawAudioFormat(
+    status_t err = setupRawAudioFormatInternal(
             encoder ? kPortIndexInput : kPortIndexOutput,
             sampleRate,
-            numChannels);
+            numChannels,
+            bitsPerSample);
 
     if (err != OK) {
         return err;
@@ -2492,7 +2559,7 @@ status_t ACodec::setupAACCodec(
 
 status_t ACodec::setupAC3Codec(
         bool encoder, int32_t numChannels, int32_t sampleRate, int32_t bitsPerSample) {
-    status_t err = setupRawAudioFormat(
+    status_t err = setupRawAudioFormatInternal(
             encoder ? kPortIndexInput : kPortIndexOutput, sampleRate, numChannels, bitsPerSample);
 
     if (err != OK) {
@@ -2530,7 +2597,7 @@ status_t ACodec::setupAC3Codec(
 
 status_t ACodec::setupEAC3Codec(
         bool encoder, int32_t numChannels, int32_t sampleRate, int32_t bitsPerSample) {
-    status_t err = setupRawAudioFormat(
+    status_t err = setupRawAudioFormatInternal(
             encoder ? kPortIndexInput : kPortIndexOutput, sampleRate, numChannels, bitsPerSample);
 
     if (err != OK) {
@@ -2677,6 +2744,11 @@ status_t ACodec::setupFlacCodec(
 }
 
 status_t ACodec::setupRawAudioFormat(
+        OMX_U32 portIndex, int32_t sampleRate, int32_t numChannels) {
+    return setupRawAudioFormatInternal(portIndex, sampleRate, numChannels, 16);
+}
+
+status_t ACodec::setupRawAudioFormatInternal(
         OMX_U32 portIndex, int32_t sampleRate, int32_t numChannels, int32_t bitsPerSample) {
     OMX_PARAM_PORTDEFINITIONTYPE def;
     InitOMXParams(&def);
@@ -2938,14 +3010,11 @@ status_t ACodec::setupVideoDecoder(
     OMX_VIDEO_CODINGTYPE compressionFormat;
     status_t err = GetVideoCodingTypeFromMime(mime, &compressionFormat);
 
+    err = FFMPEGSoftCodec::setVideoFormat(err,
+                    msg, mime, mOMX, mNode, mIsEncoder, &compressionFormat,
+                    mComponentName.c_str());
     if (err != OK) {
-        if (!strncmp(mComponentName.c_str(), "OMX.ffmpeg.", 11)) {
-            err = FFMPEGSoftCodec::setVideoFormat(
-                    msg, mime, mOMX, mNode, mIsEncoder, &compressionFormat);
-        }
-        if (err != OK) {
-            return err;
-        }
+        return err;
     }
 
     err = setVideoPortFormatType(
@@ -3094,15 +3163,12 @@ status_t ACodec::setupVideoEncoder(const char *mime, const sp<AMessage> &msg) {
     OMX_VIDEO_CODINGTYPE compressionFormat;
     err = GetVideoCodingTypeFromMime(mime, &compressionFormat);
 
+    err = FFMPEGSoftCodec::setVideoFormat(err,
+                msg, mime, mOMX, mNode, mIsEncoder, &compressionFormat,
+                mComponentName.c_str());
     if (err != OK) {
-        if (!strncmp(mComponentName.c_str(), "OMX.ffmpeg.", 11)) {
-            err = FFMPEGSoftCodec::setVideoFormat(
-                    msg, mime, mOMX, mNode, mIsEncoder, &compressionFormat);
-        }
-        if (err != OK) {
-            ALOGE("Not a supported video mime type: %s", mime);
-            return err;
-        }
+        ALOGE("Not a supported video mime type: %s", mime);
+        return err;
     }
 
     err = setVideoPortFormatType(
@@ -3755,7 +3821,7 @@ status_t ACodec::setupErrorCorrectionParameters() {
 
     errorCorrectionType.bEnableHEC = OMX_FALSE;
     errorCorrectionType.bEnableResync = OMX_TRUE;
-    errorCorrectionType.nResynchMarkerSpacing = 256;
+    errorCorrectionType.nResynchMarkerSpacing = 0;
     errorCorrectionType.bEnableDataPartitioning = OMX_FALSE;
     errorCorrectionType.bEnableRVLC = OMX_FALSE;
 
@@ -3914,6 +3980,7 @@ bool ACodec::describeDefaultColorFormat(DescribeColorFormatParams &params) {
         fmt != OMX_COLOR_FormatYUV420PackedPlanar &&
         fmt != OMX_COLOR_FormatYUV420SemiPlanar &&
         fmt != OMX_COLOR_FormatYUV420PackedSemiPlanar &&
+        fmt != OMX_TI_COLOR_FormatYUV420PackedSemiPlanar &&
         fmt != HAL_PIXEL_FORMAT_YV12) {
         ALOGW("do not know color format 0x%x = %d", fmt, fmt);
         return false;
@@ -3986,6 +4053,7 @@ bool ACodec::describeDefaultColorFormat(DescribeColorFormatParams &params) {
         case OMX_COLOR_FormatYUV420SemiPlanar:
             // FIXME: NV21 for sw-encoder, NV12 for decoder and hw-encoder
         case OMX_COLOR_FormatYUV420PackedSemiPlanar:
+        case OMX_TI_COLOR_FormatYUV420PackedSemiPlanar:
             // NV12
             image.mPlane[image.U].mOffset = params.nStride * params.nSliceHeight;
             image.mPlane[image.U].mColInc = 2;
@@ -4281,7 +4349,8 @@ status_t ACodec::getPortFormat(OMX_U32 portIndex, sp<AMessage> &notify) {
                     notify->setString("mime", MEDIA_MIMETYPE_AUDIO_RAW);
                     notify->setInt32("channel-count", params.nChannels);
                     notify->setInt32("sample-rate", params.nSamplingRate);
-                    notify->setInt32("bit-width", params.nBitPerSample);
+                    notify->setInt32("bits-per-sample", params.nBitPerSample);
+                    notify->setInt32("pcm-format", getPCMFormat(notify));
 
                     if (mChannelMaskPresent) {
                         notify->setInt32("channel-mask", mChannelMask);
@@ -4332,7 +4401,13 @@ status_t ACodec::getPortFormat(OMX_U32 portIndex, sp<AMessage> &notify) {
 
                 case OMX_AUDIO_CodingFLAC:
                 {
-                    if (portIndex == kPortIndexInput) {
+                    if (!strncmp(mComponentName.c_str(), "OMX.ffmpeg.", 11)) {
+                        err = FFMPEGSoftCodec::getAudioPortFormat(portIndex,
+                                (int)audioDef->eEncoding, notify, mOMX, mNode);
+                        if (err != OK) {
+                            return err;
+                        }
+                    } else {
                     OMX_AUDIO_PARAM_FLACTYPE params;
                     InitOMXParams(&params);
                     params.nPortIndex = portIndex;
@@ -4346,8 +4421,8 @@ status_t ACodec::getPortFormat(OMX_U32 portIndex, sp<AMessage> &notify) {
                     notify->setString("mime", MEDIA_MIMETYPE_AUDIO_FLAC);
                     notify->setInt32("channel-count", params.nChannels);
                     notify->setInt32("sample-rate", params.nSampleRate);
-                    break;
                     }
+                    break;
                 }
 
                 case OMX_AUDIO_CodingMP3:
@@ -4534,16 +4609,13 @@ void ACodec::sendFormatChange(const sp<AMessage> &reply) {
                (mEncoderDelay || mEncoderPadding)) {
         int32_t channelCount;
         CHECK(notify->findInt32("channel-count", &channelCount));
-        size_t frameSize = channelCount * sizeof(int16_t);
         if (mSkipCutBuffer != NULL) {
             size_t prevbufsize = mSkipCutBuffer->size();
             if (prevbufsize != 0) {
                 ALOGW("Replacing SkipCutBuffer holding %zu bytes", prevbufsize);
             }
         }
-        mSkipCutBuffer = new SkipCutBuffer(
-                mEncoderDelay * frameSize,
-                mEncoderPadding * frameSize);
+        mSkipCutBuffer = new SkipCutBuffer(mEncoderDelay, mEncoderPadding, channelCount);
     }
 
     getVQZIPInfo(notify);
@@ -5795,6 +5867,7 @@ bool ACodec::LoadedState::onConfigureComponent(
 
     status_t err = OK;
     AString mime;
+
     if (!msg->findString("mime", &mime)) {
         err = BAD_VALUE;
     } else {
@@ -5819,7 +5892,7 @@ bool ACodec::LoadedState::onConfigureComponent(
                 0,     // flags
                 &matchingCodecs);
 
-            status_t err = mCodec->mOMX->freeNode(mCodec->mNode);
+            err = mCodec->mOMX->freeNode(mCodec->mNode);
 
             if (err != OK) {
                 ALOGE("Failed to freeNode");
@@ -5871,11 +5944,11 @@ bool ACodec::LoadedState::onConfigureComponent(
             mCodec->mComponentName = componentName;
 
             err = mCodec->configureCodec(mime.c_str(), msg);
+        }
 
-            if (err != OK) {
-                mCodec->signalError((OMX_ERRORTYPE)err, makeNoSideEffectStatus(err));
-                return false;
-            }
+        if (err != OK) {
+            mCodec->signalError((OMX_ERRORTYPE)err, makeNoSideEffectStatus(err));
+            return false;
         }
     }
 
@@ -6638,8 +6711,34 @@ bool ACodec::OutputPortSettingsChangedState::onMessageReceived(
     bool handled = false;
 
     switch (msg->what()) {
-        case kWhatFlush:
         case kWhatShutdown:
+        {
+            int32_t keepComponentAllocated;
+            CHECK(msg->findInt32(
+                        "keepComponentAllocated", &keepComponentAllocated));
+
+            mCodec->mShutdownInProgress = true;
+            mCodec->mExplicitShutdown = true;
+            mCodec->mKeepComponentAllocated = keepComponentAllocated;
+
+            status_t err = mCodec->mOMX->sendCommand(
+                    mCodec->mNode, OMX_CommandStateSet, OMX_StateIdle);
+            if (err != OK) {
+                if (keepComponentAllocated) {
+                    mCodec->signalError(OMX_ErrorUndefined, FAILED_TRANSACTION);
+                }
+                // TODO: do some recovery here.
+            } else {
+                // This is technically not correct, but appears to be
+                // the only way to free the component instance using
+                // ExectingToIdleState.
+                mCodec->changeState(mCodec->mExecutingToIdleState);
+            }
+
+            handled = true;
+            break;
+        }
+        case kWhatFlush:
         case kWhatResume:
         case kWhatSetParameters:
         {
@@ -6706,15 +6805,6 @@ bool ACodec::OutputPortSettingsChangedState::onOMXEvent(
 
                 if (err != OK) {
                     mCodec->signalError(OMX_ErrorUndefined, makeNoSideEffectStatus(err));
-
-                    // This is technically not correct, but appears to be
-                    // the only way to free the component instance.
-                    // Controlled transitioning from excecuting->idle
-                    // and idle->loaded seem impossible probably because
-                    // the output port never finishes re-enabling.
-                    mCodec->mShutdownInProgress = true;
-                    mCodec->mKeepComponentAllocated = false;
-                    mCodec->changeState(mCodec->mLoadedState);
                 }
 
                 return true;

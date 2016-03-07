@@ -698,7 +698,11 @@ const ToneGenerator::ToneDescriptor ToneGenerator::sToneDescriptors[] = {
           { .segments = { { .duration = 0, .waveFreq = { 0 }, 0, 0 }},
           .repeatCnt = 0,
           .repeatSegment = 0 },                            // TONE_CDMA_SIGNAL_OFF
-
+        { .segments = { { .duration = 15000, .waveFreq = { 0 }, 0, 0 },
+                      { .duration = 500, .waveFreq = { 450, 0 }, 0, 0 },
+                      { .duration = 0 , .waveFreq = { 0 }, 0, 0}},
+          .repeatCnt = ToneGenerator::TONEGEN_INF,
+          .repeatSegment = 0 },                              // TONE_HOLD_RECALL
         { .segments = { { .duration = ToneGenerator::TONEGEN_INF, .waveFreq = { 350, 440, 0 }, 0, 0 },
                         { .duration = 0 , .waveFreq = { 0 }, 0, 0}},
           .repeatCnt = ToneGenerator::TONEGEN_INF,
@@ -1586,7 +1590,8 @@ void ToneGenerator::WaveGenerator::getSamples(short *outBuffer,
         }
         long dec = lAmplitude/count;
         // loop generation
-        while (count--) {
+        while (count) {
+            count--;
             Sample = ((lA1 * lS1) >> S_Q14) - lS2;
             // shift delay
             lS2 = lS1;
@@ -1597,7 +1602,8 @@ void ToneGenerator::WaveGenerator::getSamples(short *outBuffer,
         }
     } else {
         // loop generation
-        while (count--) {
+        while (count) {
+            count--;
             Sample = ((lA1 * lS1) >> S_Q14) - lS2;
             // shift delay
             lS2 = lS1;

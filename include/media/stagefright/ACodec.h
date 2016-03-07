@@ -310,6 +310,9 @@ protected:
     status_t submitOutputMetadataBuffer();
     void signalSubmitOutputMetadataBufferIfEOS_workaround();
     status_t allocateOutputBuffersFromNativeWindow();
+#ifdef USE_SAMSUNG_COLORFORMAT
+    void setNativeWindowColorFormat(OMX_COLOR_FORMATTYPE &eNativeColorFormat);
+#endif
     status_t cancelBufferToNativeWindow(BufferInfo *info);
     status_t freeOutputBuffersNotOwnedByComponent();
     BufferInfo *dequeueBufferFromNativeWindow();
@@ -364,7 +367,7 @@ protected:
             int32_t numChannels, int32_t sampleRate, int32_t bitRate,
             int32_t aacProfile, bool isADTS, int32_t sbrMode,
             int32_t maxOutputChannelCount, const drcParams_t& drc,
-            int32_t pcmLimiterEnable);
+            int32_t pcmLimiterEnable, int32_t bitsPerSample = 16);
 
     status_t setupAC3Codec(bool encoder, int32_t numChannels, int32_t sampleRate,
             int32_t bitsPerSample = 16);
@@ -382,8 +385,7 @@ protected:
             bool encoder, int32_t numChannels, int32_t sampleRate, int32_t compressionLevel);
 
     status_t setupRawAudioFormat(
-            OMX_U32 portIndex, int32_t sampleRate, int32_t numChannels,
-            int32_t bitsPerSample = 16);
+            OMX_U32 portIndex, int32_t sampleRate, int32_t numChannels);
 
     status_t setPriority(int32_t priority);
     status_t setOperatingRate(float rateFloat, bool isVideo);
@@ -483,6 +485,10 @@ protected:
     void     setDolbyParameter(const sp<AMessage> &msg);
     status_t setDolbyParameterOnProcessedAudio(const sp<AMessage> &params);
 #endif // DOLBY_END
+
+    status_t setupRawAudioFormatInternal(
+            OMX_U32 portIndex, int32_t sampleRate, int32_t numChannels,
+            int32_t bitsPerSample);
 
     DISALLOW_EVIL_CONSTRUCTORS(ACodec);
 };

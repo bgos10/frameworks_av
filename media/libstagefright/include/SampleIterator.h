@@ -14,6 +14,10 @@
  * limitations under the License.
  */
 
+#ifndef SAMPLE_ITERATOR_H_
+
+#define SAMPLE_ITERATOR_H_
+
 #include <utils/Vector.h>
 
 namespace android {
@@ -22,6 +26,7 @@ class SampleTable;
 
 struct SampleIterator {
     SampleIterator(SampleTable *table);
+    ~SampleIterator();
 
     status_t seekTo(uint32_t sampleIndex);
 
@@ -64,6 +69,10 @@ private:
     uint32_t mCurrentSampleTime;
     uint32_t mCurrentSampleDuration;
 
+    uint8_t *mSampleCache;
+    uint32_t mSampleCacheSize;
+    uint32_t mCurrentSampleCacheStartIndex;
+
     void reset();
     status_t findChunkRange(uint32_t sampleIndex);
     status_t getChunkOffset(uint32_t chunk, off64_t *offset);
@@ -75,3 +84,4 @@ private:
 
 }  // namespace android
 
+#endif  // SAMPLE_ITERATOR_H_

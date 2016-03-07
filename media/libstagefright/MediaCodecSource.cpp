@@ -216,7 +216,7 @@ void MediaCodecSource::Puller::onMessageReceived(const sp<AMessage> &msg) {
             status_t err = mSource->read(&mbuf);
 
             if (mPaused) {
-                if (err == OK) {
+                if (err == OK && (NULL != mbuf)) {
                     mbuf->release();
                     mbuf = NULL;
                 }
@@ -429,8 +429,13 @@ status_t MediaCodecSource::initEncoder() {
         return err;
     }
 
+    int32_t hfrRatio = 0;
+    mOutputFormat->findInt32("hfr-ratio", &hfrRatio);
+
     mEncoder->getOutputFormat(&mOutputFormat);
     convertMessageToMetaData(mOutputFormat, mMeta);
+
+    AVUtils::get()->HFRUtils().setHFRRatio(mMeta, hfrRatio);
 
     if (mFlags & FLAG_USE_SURFACE_INPUT) {
         CHECK(mIsVideo);
